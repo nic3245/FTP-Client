@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import socket
+from urllib.parse import urlparse
+
+
+def ls_operation(subparser):
+    """
+    Adds the cmd line args for ls.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_ls = subparser.add_parser('ls', help='Print out the directory listing from the FTP server at the given URL')
+    parser_ls.add_argument('ARG', help='URL of server')
+
+
+def mkdir_operation(subparser):
+    """
+    Adds the cmd line args for mkdir.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_mkdir = subparser.add_parser('mkdir', help='Create a new directory on the FTP server at the given URL')
+    parser_mkdir.add_argument('ARG', help='URL of server')
+
+
+def rm_operation(subparser):
+    """
+    Adds the cmd line args for rm.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_rm = subparser.add_parser('rm', help='Delete the file on the FTP server at the given URL')
+    parser_rm.add_argument('ARG', help='URL of server')
+
+
+def rmdir_operation(subparser):
+    """
+    Adds the cmd line args for rmdir.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_rmdir = subparser.add_parser('rmdir', help='Delete the directory on the FTP server at the given URL')
+    parser_rmdir.add_argument('ARG', help='URL of server')
+
+
+def cp_operation(subparser):
+    """
+    Adds the cmd line args for cp.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_cp = subparser.add_parser('cp', help='Copy the file given by ARG1 to the file given by ARG2.')
+    parser_cp.add_argument('ARG', nargs=2, help='If ARG1 is a local file, then ARG2 must be a URL, and vice-verse.')
+
+
+def mv_operation(subparser):
+    """
+    Adds the cmd line args for mv.
+
+    :param subparser: a subparser of the overall cmd line parser
+    """
+    parser_mv = subparser.add_parser('mv', help='List contents of directory')
+    parser_mv.add_argument('ARG', nargs=2, help='If ARG1 is a local file, then ARG2 must be a URL, and vice-verse.')
+
+
+def set_cmd_args():
+    """
+    Sets the command line arguments for this script.
+
+    :return: parser object that the arguments can be fetched from
+    """
+    # Program name and description
+    parser = argparse.ArgumentParser(prog='3700ftp', description='FTP client.')
+    subparser = parser.add_subparsers(dest="operation", help="Operation to perform in the client.")
+    # Add subparsers for each operation
+    mv_operation(subparser)
+    cp_operation(subparser)
+    rmdir_operation(subparser)
+    rm_operation(subparser)
+    mkdir_operation(subparser)
+    ls_operation(subparser)
+
+    return parser
+
+
+def get_params_from_args(args):
+    """
+    Gets the important values from the command line args.
+
+    :param args: command line arguments
+    :return: operation, username, password, host, port, path, filepath
+    """
+    # if it's an operation with two arguments
+    if args.operation == 'cp' or args.operation == 'mv':
+        # file tuple to determine the order (0: client -> server or 1: server -> client)
+        if 'ftp://' in args.ARG[0]:
+            url = args.ARG[0]
+            file = (args.ARG[1], 1)  # server -> client
+        else:
+            url = args.ARG[1]
+            file = (args.ARG[0], 0)  # client -> server
+    else:
+        url = args.ARG
+        file = None
+
+    parsed_url = urlparse(url)
+    # has username
+    if '@' in parsed_url.netloc:
+        second_half = parsed_url.netloc[parsed_url.netloc.find('@') + 1:]
+        # has password
+        if ':' in parsed_url.netloc[:parsed_url.netloc.find('@')]:
+            username = parsed_url.netloc[0: parsed_url.netloc.find(':')]
+            password = parsed_url.netloc[parsed_url.netloc.find(':') + 1: parsed_url.netloc.find('@')]
+        # doesn't have password
+        else:
+            username = parsed_url.netloc[0: parsed_url.netloc.find('@')]
+            password = None
+        # has port
+        if ':' in second_half:
+            host = second_half[:second_half.find(':')]
+            port = second_half[second_half.find(':') + 1:]
+        # doesn't have port
+        else:
+            host = second_half
+            port = 21
+    # doesn't have username
+    else:
+        username = 'anonymous'
+        password = None
+        # has port
+        if ':' in parsed_url.netloc:
+            host = parsed_url.netloc[:parsed_url.netloc.find(':')]
+            port = parsed_url.netloc[parsed_url.netloc.find(':') + 1:]
+        # doesn't have port
+        else:
+            host = parsed_url.netloc
+            port = 21
+    return args.operation, username, password, host, port, parsed_url.path, file
+
+
+def receive_message(s):
+    """
+    Receives a message from given socket until \r\n is encountered.
+
+    :param s: socket to receive from
+    :return: raw byte string received from socket
+    """
+    chunk = b''
+    data = b''
+
+    while b'\r\n' not in chunk:
+        chunk = s.recv(1024)
+        data += chunk
+
+    return data
+
+
+def login(sock, username, password):
+    """
+    Logs into the ftp server with the given username and password.
+
+    :param sock: socket connection to the server
+    :param username: username
+    :param password: password
+    """
+    user_string = f"USER {username}\r\n"
+    sock.sendall(user_string.encode('utf-8'))
+    if b"331" in receive_message(sock):
+        print("Username exists on server.")
+        pass_string = f"PASS {password}\r\n"
+        sock.sendall(pass_string.encode('utf-8'))
+        if b"230" in receive_message(sock):
+            print("Login successful.")
+        else:
+            raise ConnectionError("Invalid password for the username provided for the selected server.")
+    else:
+        raise ConnectionError("Invalid username for the selected server.")
+
+
+def set_type_mode_stru(sock):
+    """
+    Sets the type, mode, and stru to the correct setting for the client interaction.
+
+    :param sock: socket with the connection to the server
+    """
+    type_string_encoded = b"TYPE I\r\n"
+    mode_string_encoded = b"MODE S\r\n"
+    stru_string_encoded = b"STRU F\r\n"
+
+    sock.sendall(type_string_encoded)
+    if b"200" in receive_message(sock):
+        print("Successfully switched to binary mode")
+
+    sock.sendall(mode_string_encoded)
+    if b"200" in receive_message(sock):
+        print("Successfully set mode to S")
+
+    sock.sendall(stru_string_encoded)
+    if b"200" in receive_message(sock):
+        print("Successfully set structure to F")
+
+
+def close_connection(sock):
+    """
+    Closes the connection to the server.
+
+    :param sock: socket housing the connection to the server
+    """
+    sock.sendall(b"QUIT\r\n")
+    if b"221" in receive_message(sock):
+        print("Successfully closed connection")
+
+
+def make_directory(sock, path):
+    """
+    Makes a directory at path on the server.
+
+    :param sock: socket housing the connection to the server
+    :param path: path on the server to make the directory at
+    """
+    make_string = f"MKD {path}\r\n"
+    sock.sendall(make_string.encode('utf-8'))
+    if b"257" in receive_message(sock):
+        print("Directory successfully created")
+
+
+def remove_directory(sock, path):
+    """
+    Removes the directory at path on the server.
+
+    :param sock: socket housing the connection to the server
+    :param path: path on the server to remove the directory from
+    """
+    remove_string = f"RMD {path}\r\n"
+    sock.sendall(remove_string.encode('utf-8'))
+    if b"250" in receive_message(sock):
+        print("Removed directory successfully")
+
+
+def open_pasv(sock):
+    """
+    Opens a data channel socket.
+
+    :param sock:  socket housing the communication connection with the server
+    :return: data channel socket connected to the server
+    """
+    sock.sendall(b"PASV\r\n")
+    response = receive_message(sock)
+    if b"227" in response:
+        response = response.decode('utf-8')
+        nums_string = response[response.find("("):response.find(".")]
+        nums_list = list(eval(nums_string))
+        ip_address = str(nums_list[0])
+        for i in range(1, 4):
+            ip_address += "."
+            ip_address += str(nums_list[i])
+        port_number = (nums_list[-2] << 8) + nums_list[-1]
+        data_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        data_sock.connect((ip_address, port_number))
+        return data_sock
+    else:
+        raise ConnectionError("Problem getting ip and port for data channel.")
+
+
+def list_directory(sock, path):
+    """
+    Prints the directory list at path to the command line terminal.
+
+    :param sock: socket housing the connection to the server
+    :param path:  path to get the listing of
+    """
+    data_sock = open_pasv(sock)
+    list_string = f"LIST {path}\r\n"
+    sock.sendall(list_string.encode('utf-8'))
+
+    if b"150" in receive_message(sock):
+        print("Request sent successfully.")
+        if b"226" in receive_message(sock):
+            print("Data sent successfully. Here it is:")
+            print(receive_message(data_sock).decode('utf-8'))
+            data_sock.close()
+    else:
+        raise ConnectionError("Problem requesting directory list.")
+
+
+def delete_file(sock, path):
+    """
+    Deletes the file at path from the server.
+
+    :param sock: socket housing the connection to the server
+    :param path: path to the file on the server
+    """
+    dele_string = f"DELE {path}\r\n"
+    sock.sendall(dele_string.encode('utf-8'))
+    if b"250" in receive_message(sock):
+        print("File deleted successfully.")
+    else:
+        raise ConnectionError("Problem deleting file.")
+
+
+def read_file(filepath):
+    """
+    Reads a file at filepath from the local machine.
+
+    :param filepath: path of the file on the local machine
+    :return: file as byte data
+    """
+    with open(filepath, 'rb') as file:  # read bytes mode
+        # Read data from the file
+        return file.read()
+
+
+def upload_file(sock, path, filepath):
+    """
+    Uploads a file to the server.
+    :param sock: socket housing the connection
+    :param path: path on the server to upload to
+    :param filepath: file path on the local machine
+    """
+    file_data = read_file(filepath)
+    data_sock = open_pasv(sock)
+    path = path[1:]
+    upload_string = f"STOR {path}\r\n"
+    sock.sendall(upload_string.encode('utf-8'))
+    if b"150" in receive_message(sock):
+        data_sock.sendall(file_data)
+        data_sock.close()
+        if b"226" in receive_message(sock):
+            print("File sent successfully.")
+
+
+def create_file(path, data):
+    """
+    Writes the data to a file at path on the local machine.
+
+    :param path: path on the local machine to write the file to
+    :param data: byte data of the file
+    """
+    try:
+        with open(path, 'wb') as file:  # write byte mode
+            file.write(data)
+    except Exception as e:
+        print(f"Error creating file: {e}")
+
+
+def download_file(sock, path, filepath):
+    """
+    Downloads a file from the server to the local machine.
+
+    :param sock: socket housing the connection to the server
+    :param path: path of the file on the server
+    :param filepath: path on the local machine to save the file at
+    """
+    data_sock = open_pasv(sock)
+    data = b""
+    path = path[1:]
+    download_string = f"RETR {path}\r\n"
+    sock.sendall(download_string.encode('utf-8'))
+    if b"150" in receive_message(sock):
+        chunk = data_sock.recv(1024)
+        while chunk:
+            data += chunk
+            chunk = data_sock.recv(1024)
+        create_file(filepath, data)
+        if b"226" in receive_message(sock):
+            print("File downloaded successfully.")
+
+
+def connect_and_perform_operation(args):
+    """
+    Performs the operations by communicating with a socket connected to server, then closes the connection.
+
+    :param args: command line arguments
+    """
+    # Set up socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+
+        # Get the necessary values from the cmd line args
+        operation, username, password, host, port, path, file = get_params_from_args(args)
+        # Connect
+        try:
+            sock.connect((host, port))
+        except:
+            raise ConnectionError("Problem connecting to the server, make sure host and port are accurate.")
+
+        # read the obligatory hello message
+        receive_message(sock)
+        # login
+        login(sock, username, password)
+        # set modes
+        set_type_mode_stru(sock)
+        # run command
+        if operation == 'ls':
+            list_directory(sock, path)
+        elif operation == 'mkdir':
+            make_directory(sock, path)
+        elif operation == 'rmdir':
+            remove_directory(sock, path)
+        elif operation == 'rm':
+            delete_file(sock, path)
+        elif operation == 'cp':
+            # File came second, so download
+            if file[1] == 1:
+                download_file(sock, path, file[0])
+            # File first, so upload
+            else:
+                upload_file(sock, path, file[0])
+        elif operation == 'mv':
+            # File came second, so download
+            if file[1] == 1:
+                download_file(sock, path, file[0])
+                delete_file(sock, path)
+            # File first, so upload
+            else:
+                upload_file(sock, path, file[0])
+                os.remove(file)
+
+        close_connection(sock)
+
+
+# Run Program
+connect_and_perform_operation(set_cmd_args().parse_args())
